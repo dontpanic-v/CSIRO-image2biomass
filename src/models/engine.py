@@ -1,10 +1,12 @@
 """DINOv3 training loops: per-fold out-of-fold training and full-data retraining."""
 import gc
+import random
 
 import numpy as np
 import torch
 import torch.optim as optim
 from torch.utils.data import DataLoader
+from torch.optim.swa_utils import AveragedModel
 from tqdm.auto import tqdm
 
 from sklearn.model_selection import GroupKFold
@@ -136,3 +138,89 @@ def train_dino_oof(dataframe, n_folds=5):
 
     return oof_predictions
 
+
+def train_dino_full(dataframe):
+    # retrain on 100% of the data (no held-out fold) for the submission model;
+    # adds AMP, an EMA shadow copy, and MixUp on top of the per-fold recipe.
+    # No validation split to protect, so borders are computed from all of it.
+    borders = compute_target_borders(dataframe, n_bins=cfg.N_BINS)
+
+    dataset_train = BiomassDataset(dataframe, get_train_transforms(cfg.IMG_SIZE))
+    loader_train = DataLoader(
+        dataset_train, batch_size=cfg.BATCH_SIZE_DINO, shuffle=True,
+        num_workers=cfg.NUM_WORKERS, pin_memory=True, drop_last=True,
+    )
+
+    epochs = cfg.EPOCHS if not cfg.FAST_DEBUG else 1
+    warmup_epochs = min(cfg.WARMUP_EPOCHS, max(0, epochs - 1))
+
+    model = DINOv3Regressor(
+        cfg.DINO_MODEL_NAME, borders,
+        local_only=cfg.DINO_LOCAL_ONLY,
+        freeze_backbone=warmup_epochs > 0,
+    ).to(DEVICE)
+
+    # differential learning rates: slow for pretrained backbone, fast for regression/classification heads
+    backbone_params = list(model.backbone.parameters())
+    optimizer = optim.AdamW([
+        {'params': backbone_params, 'lr': 1e-5},
+        {'params': _head_parameters(model), 'lr': 2e-4},
+    ], weight_decay=1e-2)
+
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=epochs * len(loader_train),
+    )
+    criterion = WeightedBiomassLoss(cls_weight=cfg.CLS_LOSS_WEIGHT)
+
+    use_amp = (DEVICE == 'cuda')
+    scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
+
+    ema_model = AveragedModel(model)
+
+    mixup_prob = 0.30
+    mixup_alpha = 0.4
+
+    for epoch in range(epochs):
+        if epoch == warmup_epochs and warmup_epochs > 0:
+            for param in model.backbone.parameters():
+                param.requires_grad = True
+
+        model.train()
+        running_loss = 0.0
+        progress_bar = tqdm(loader_train, desc=f'full-train epoch {epoch + 1}/{epochs}')
+
+        for left, right, batch_targets in progress_bar:
+            left = left.to(DEVICE, non_blocking=True)
+            right = right.to(DEVICE, non_blocking=True)
+            batch_targets = batch_targets.to(DEVICE, non_blocking=True)
+
+            # MixUp: blend pairs of samples within the batch, before binning
+            # so classification labels stay derived from the same values
+            # the regression heads are trained against
+            if random.random() < mixup_prob and left.size(0) > 1:
+                lam = np.random.beta(mixup_alpha, mixup_alpha)
+                perm = torch.randperm(left.size(0), device=DEVICE)
+                left = lam * left + (1 - lam) * left[perm]
+                right = lam * right + (1 - lam) * right[perm]
+                batch_targets = lam * batch_targets + (1 - lam) * batch_targets[perm]
+
+            optimizer.zero_grad(set_to_none=True)
+
+            with torch.cuda.amp.autocast(enabled=use_amp):
+                predictions, cls_logits = model(left, right)
+                loss = criterion(predictions, batch_targets, cls_logits, _cls_labels(batch_targets, borders))
+
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            scaler.step(optimizer)
+            scaler.update()
+            scheduler.step()
+            ema_model.update_parameters(model)
+
+            running_loss += loss.item()
+            progress_bar.set_postfix(loss=f'{loss.item():.4f}')
+
+        print(f'  average loss: {running_loss / len(loader_train):.4f}')
+
+    return model, ema_model, borders
