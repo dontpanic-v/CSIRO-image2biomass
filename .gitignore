@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# competition data and trained artifacts (large, regenerable)
+/train.csv
+/test.csv
+/train_images/
+/test_images/
+/models/
+/cache_csiro/
+*.npy
+*.pkl
+*.pth
+*.cbm
+
+# internal-only notes, not shipped in the public repo
+/docs/
+/temps/
+
+# editors
+.obsidian/
+
+# OS
+.DS_Store
