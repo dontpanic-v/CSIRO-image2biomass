@@ -1,117 +1,116 @@
 # CSIRO Image-to-Biomass
-## Competition Task
 
-Given a photograph of a pasture plot, predict five biomass targets (in grams):
+Predict pasture biomass from field photographs. Reimplements the [1st-place solution](https://www.kaggle.com/competitions/csiro-biomass/writeups/1st-place-solution) for the Kaggle CSIRO Biomass competition.
 
-- `Dry_Green_g` - dry weight of green grass
-- `Dry_Clover_g` - dry weight of clover
-- `Dry_Dead_g` - dry weight of dead material
-- `GDM_g` - Green Dry Matter (= Dry_Green + Dry_Clover)
-- `Dry_Total_g` - total dry biomass (= GDM + Dry_Dead)
+## Task
 
-Evaluation metric: **Weighted R-squared** across all five targets, with Dry_Total weighted 0.5, GDM weighted 0.2, and each leaf component weighted 0.1.
+Given a photograph of a pasture plot, predict five dry-weight targets (grams):
+
+| Target | Weight in metric |
+|--------|-----------------|
+| `Dry_Total_g` | 0.5 |
+| `GDM_g` (Green Dry Matter) | 0.2 |
+| `Dry_Green_g` | 0.1 |
+| `Dry_Clover_g` | 0.1 |
+| `Dry_Dead_g` | 0.1 |
+
+Evaluation: weighted R-squared across all five targets.
 
 ## Pipeline
 
 ```
 Raw Image
     |
-    v
-Clean (crop bottom strip, inpaint orange date-stamps)
+Clean (crop metadata strip, inpaint date-stamps)
     |
-    v
 Split into left and right halves
     |
-    v
 Shared DINOv3 backbone (both halves)
     |
-    v
 Cross-view self-attention fusion
     |
-    v
-Five independent regression heads  +  five interval-classification heads
-(green, dead, clover, GDM, total)     (auxiliary training signal, discarded at inference)
+5 regression heads  +  5 auxiliary interval-classification heads
     |
-    v
-Mass Balance Enforcement
-(clip negatives, recompute GDM/Total from components)
+Mass balance enforcement (clip negatives, recompute GDM/Total)
     |
-    v
-Final Predictions
+Final predictions
 ```
-
-## Repository Structure
-
-```
-csiro-image2biomass/
-    README.md
-    requirements.txt
-    train.py                  - entry point: runs the full pipeline end to end
-    src/
-        __init__.py
-        config.py              - paths, hyperparameters, constants, seed
-        data/
-            loading.py          - CSV loading, pivot, path resolution
-            preprocessing.py    - image cleaning, left/right split
-            cv.py                 - group-aware cross-validation split keys
-        models/
-            dataset.py            - BiomassDataset
-            transforms.py          - albumentations augmentation pipelines
-            camera_distance.py      - camera-distance simulation transform
-            attention_fusion.py      - CrossViewAttention (left/right fusion)
-            borders.py                - quantile bin edges for interval classification
-            losses.py                  - regression + classification combined loss
-            dinov3.py                   - DINOv3Regressor
-            engine.py                    - DINOv3 two-stage, K-fold and full-data training
-        metrics.py             - competition R2 metric, mass balance enforcement
-    scripts/
-        setup_colab.sh          - one-time Colab environment bootstrap
-        download_weights.py     - predownload weights for offline Kaggle submission
-```
-
-## Key Design Decisions
-
-- **Cross-view self-attention fusion.** Left and right image halves are encoded separately through a shared DINOv3 backbone, then interact through a single multi-head self-attention layer before the regression heads.
-- **Five independent regression heads.** The model predicts all five targets directly, with no architectural constraint forcing GDM/Total consistency during training.
-- **Auxiliary interval-classification heads.** Every target also gets a classifier predicting which quantile bin its value falls in, trained jointly with the regression heads as a complementary signal.
-- **Two-stage training and expanded augmentation.** The backbone trains frozen for a warmup phase before unfreezing, and the augmentation pipeline covers a wider range of lighting/camera conditions.
-- **Group-aware cross-validation.** Folds are split by state + sampling date, not a plain shuffle, so photos from the same site visit can't leak across train and validation.
-- **Mass balance post-processing.** Predictions are clipped to non-negative values, then GDM and Dry_Total are recomputed from their constituent parts to guarantee physical consistency — the only place this is enforced, since the architecture doesn't guarantee it.
 
 ## Model
 
-| Model | Source | Parameters |
-|-------|--------|------------|
-| DINOv3 | `facebook/dinov3-vitl16-pretrain-lvd1689m` (Hugging Face) | ~300 million |
+| Component | Detail |
+|-----------|--------|
+| Backbone | DINOv3 ViT-L/16 (`facebook/dinov3-vitl16-pretrain-lvd1689m`, ~300M params) |
+| Fusion | CrossViewAttention — multi-head self-attention over left/right encodings |
+| Heads | 5 independent regression (Softplus) + 5 auxiliary bin classifiers |
+| Training | Two-stage (frozen warmup -> full fine-tune), differential lr, cosine annealing, MixUp, AMP, EMA |
+| CV | Group-aware K-fold (state + date), no site-visit leakage |
 
-## Environment
+## Project Structure
 
-Built for **Google Colab** with GPU. Configuration paths default to `/content/`; override with the `CSIRO_DATA_PATH` environment variable, or `train.py --data-path`, for local or other notebook environments. For Kaggle offline submissions, set `DINO_LOCAL_ONLY = True` in `src/config.py` and predownload model weights with `scripts/download_weights.py`.
+```
+csiro-image2biomass/
+  train.py                        Entry point: full pipeline end to end
+  src/
+    config.py                     Paths, hyperparameters, constants, seed
+    metrics.py                    Weighted R2 metric, mass balance enforcement
+    data/
+      loading.py                  CSV loading, pivot, path resolution
+      preprocessing.py            Image cleaning, left/right split
+      cv.py                       Group-aware cross-validation split keys
+    models/
+      dataset.py                  BiomassDataset
+      transforms.py               Albumentations augmentation pipelines
+      camera_distance.py          Camera-distance simulation transform
+      attention_fusion.py         CrossViewAttention (left/right fusion)
+      borders.py                  Quantile bin edges for interval classification
+      losses.py                   Regression + classification combined loss
+      dinov3.py                   DINOv3Regressor
+      engine.py                   K-fold and full-data training loops
+  scripts/
+    setup_colab.sh                Colab environment bootstrap
+    download_weights.py           Predownload weights for offline Kaggle
+```
 
 ## Quick Start
 
-```bash
-# in Colab, first bootstrap the environment (installs deps, downloads competition data)
-bash scripts/setup_colab.sh
+Built for Google Colab with GPU. Paths default to `/content/`; override with `CSIRO_DATA_PATH` or `--data-path`.
 
+```bash
+bash scripts/setup_colab.sh       # install deps, download competition data
 pip install -r requirements.txt
-python train.py
+python train.py                   # full run
+python train.py --fast-debug --debug-samples 50   # smoke test
 ```
 
-Useful flags: `python train.py --fast-debug --debug-samples 50` for a quick end-to-end smoke test, or `--n-folds` / `--epochs` / `--output-dir` to override `src/config.py` defaults without editing it. Run `python train.py --help` for the full list.
+Run `python train.py --help` for all flags (`--n-folds`, `--epochs`, `--output-dir`, etc.).
 
 ## Outputs
 
-`train.py` writes to `--output-dir` (default `/content/models`):
+Saved to `--output-dir` (default `/content/models`):
 
-- `dinov3_regressor.pth` - full model checkpoint (Exponential Moving Average weights)
-- `dinov3_heads_only.pth` - fusion + regression/classification heads only (smaller file, requires the Hugging Face backbone)
-- `config.json` - configuration metadata, including the fitted interval-classification bin edges, for inference
+| File | Description |
+|------|-------------|
+| `dinov3_regressor.pth` | Full checkpoint (EMA weights) |
+| `dinov3_heads_only.pth` | Fusion + heads only (smaller, requires HF backbone) |
+| `config.json` | Metadata including fitted bin edges for inference |
+
+## Key Design Decisions
+
+**Cross-view fusion** — left and right image halves encode through a shared backbone, then interact via self-attention before regression. Captures spatial relationships across the full plot.
+
+**Auxiliary interval classifiers** — each target gets a quantile-bin classifier trained jointly with regression. Complementary signal that regularizes the regression heads (adapted from UEPNet crowd counting).
+
+**Mass balance post-processing** — GDM and Dry_Total are recomputed from components after inference. The architecture doesn't enforce physical consistency, so this is the only place it's guaranteed.
+
+**Group-aware CV** — folds split by state + sampling date so photos from the same site visit can't leak across train and validation.
 
 ## Acknowledgments
 
-This project reimplements the competition's 1st place solution.
+Reimplements the 1st-place solution:
 
-> Baiph, HZM, TheoQiu, zxc123cc. *1st Place Solution.* https://www.kaggle.com/competitions/csiro-biomass/writeups/1st-place-solution. 2026. Kaggle.
+> Baiph, HZM, TheoQiu, zxc123cc. *1st Place Solution.* Kaggle, 2026.
 
-Their interval-classification head is itself adapted from crowd-counting research: Wang, C., Song, Q., Zhang, B., Wang, Y., Tai, Y., Hu, X., Wang, C., Li, J., Ma, J., & Wu, Y. (2021). *Uniformity in heterogeneity: Diving deep into count interval partition for crowd counting.* ICCV.
+Interval-classification head adapted from:
+
+> Wang et al. *Uniformity in Heterogeneity: Diving Deep into Count Interval Partition for Crowd Counting.* ICCV, 2021.
