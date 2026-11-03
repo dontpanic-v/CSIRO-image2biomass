@@ -59,4 +59,11 @@ def attach_absolute_paths(train_wide):
             lambda path: str(cfg.DATA_PATH / path)
         )
 
+    # check every image up front so a bad path fails before any model loads
+    missing = [path for path in train_wide['abs_path'] if not os.path.exists(path)]
+    if missing:
+        raise FileNotFoundError(
+            f'{len(missing)} of {len(train_wide)} training images not found, e.g. {missing[0]}'
+        )
+
     return train_wide

@@ -46,6 +46,11 @@ class CFG:
     N_BINS: int = 7
     CLS_LOSS_WEIGHT: float = 0.3
 
+    # decay for the EMA shadow model (per-fold and full-data training); 0.99 has a
+    # half-life of ~69 optimizer steps, so the average stays weighted toward
+    # recent weights rather than early, untrained ones
+    EMA_DECAY: float = 0.99
+
 
 cfg = CFG()
 
