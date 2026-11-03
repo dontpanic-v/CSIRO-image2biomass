@@ -22,7 +22,10 @@ class WeightedBiomassLoss(nn.Module):
 
     def forward(self, predictions, targets, cls_logits, cls_labels):
         weights = torch.as_tensor(R2_WEIGHTS, device=predictions.device)
-        regression_loss = (self.regression_loss(predictions, targets) * weights).mean()
+        # weighted sum over targets (weights sum to 1), then mean over the
+        # batch — same scale as the classification term, so cls_weight is
+        # the true relative weight
+        regression_loss = (self.regression_loss(predictions, targets) * weights).sum(dim=1).mean()
 
         classification_loss = sum(
             self.classification_loss(cls_logits[target], cls_labels[target])

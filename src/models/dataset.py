@@ -24,7 +24,9 @@ class BiomassDataset(Dataset):
     def __getitem__(self, index):
         image = load_and_preprocess_image(self.paths[index], clean=True)
         if image is None:
-            image = np.zeros((900, 2000, 3), dtype=np.uint8)
+            # fail loudly: a placeholder image would still carry this
+            # sample's real labels and silently corrupt training
+            raise RuntimeError(f'could not read image: {self.paths[index]}')
 
         left_half, right_half = split_left_right(image)
         left_half = self.transform(image=left_half)['image']
